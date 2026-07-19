@@ -1,38 +1,33 @@
+"""
+خادم MCP لربط Claude مع دفترة — حساب صبرة تك
+Daftra MCP Server for Sabra Tech (المعمارية الموسعة v2)
+
+نقطة الدخول الوحيدة: تهيئة Logging ثم تحميل الإعدادات ثم محرك الصلاحيات
+ثم السجل مع الاكتشاف التلقائي ثم تشغيل FastMCP.
+
+متغيرات البيئة المطلوبة:
+- DAFTRA_SUBDOMAIN : النطاق الفرعي (كلمة واحدة).
+- DAFTRA_APIKEY    : مفتاح API من دفترة.
+- DAFTRA_ROLE      : اختياري (admin / operator / viewer) — الافتراضي admin.
+"""
+
 import os
-import httpx
+
 from fastmcp import FastMCP
+
+from app.core import registry as registry_module
+from app.core.config import Settings, setup_logging
+from app.core.permissions import PermissionEngine
+from app.core.registry import ToolRegistry
+
+setup_logging()
+settings = Settings.load()
 
 mcp = FastMCP("Daftra-SabraTech")
 
-SUBDOMAIN = os.environ["DAFTRA_SUBDOMAIN"]
-APIKEY = os.environ["DAFTRA_APIKEY"]
-
-def _get(path: str, params: dict | None = None) -> dict:
-    url = f"https://{SUBDOMAIN}.daftra.com/api2/{path}"
-    headers = {"apikey": APIKEY, "Accept": "application/json"}
-    r = httpx.get(url, headers=headers, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-@mcp.tool()
-def list_clients(page: int = 1, limit: int = 10) -> dict:
-    """جلب قائمة عملاء صبرة تك من دفترة."""
-    return _get("clients", {"page": page, "limit": limit})
-
-@mcp.tool()
-def get_client(client_id: int) -> dict:
-    """جلب بيانات عميل واحد برقمه."""
-    return _get(f"clients/{client_id}")
-
-@mcp.tool()
-def list_invoices(page: int = 1, limit: int = 10) -> dict:
-    """جلب قائمة فواتير صبرة تك."""
-    return _get("invoices", {"page": page, "limit": limit})
-
-@mcp.tool()
-def list_products(page: int = 1, limit: int = 10) -> dict:
-    """جلب قائمة المنتجات من دفترة."""
-    return _get("products", {"page": page, "limit": limit})
+registry = ToolRegistry(mcp, PermissionEngine(settings.role), settings)
+registry_module.active_registry = registry
+registry.discover("app.modules")
 
 if __name__ == "__main__":
     mcp.run(
