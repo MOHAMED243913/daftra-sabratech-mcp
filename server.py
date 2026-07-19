@@ -1,7 +1,7 @@
 """
-Daftra SabraTech MCP Server — Full CRUD
+Daftra SabraTech MCP Server - Full CRUD
 ========================================
-خادم MCP كامل الصلاحيات (قراءة / إنشاء / تعديل / حذف) لحساب دفترة الخاص بصبرة تك.
+خادم MCP كامل الصلاحيات (قراءة / انشاء / تعديل / حذف) لحساب دفترة الخاص بصبرة تك.
 
 المتغيرات البيئية المطلوبة:
     DAFTRA_SUBDOMAIN  -> النطاق الفرعي لحسابك في دفترة
@@ -23,11 +23,10 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-mcp = FastMCP("Daftra SabraTech — Full CRUD")
+mcp = FastMCP("Daftra SabraTech - Full CRUD")
 
 
-def _request(method: str, endpoint: str, params: dict | None = None,
-             body: dict | None = None) -> dict:
+def _request(method, endpoint, params=None, body=None):
     url = f"{BASE_URL}/{endpoint.lstrip('/')}"
     try:
         with httpx.Client(timeout=30) as client:
@@ -63,25 +62,23 @@ RESOURCES = {
 }
 
 
-def _resolve(resource: str):
+def _resolve(resource):
     r = resource.strip().lower()
     if r not in RESOURCES:
-        return None, {
-            "error": f"المورد '{resource}' غير مدعوم.",
-            "الموارد_المتاحة": list(RESOURCES.keys()),
-        }
+        return None, {"error": "resource not supported",
+                      "available": list(RESOURCES.keys())}
     return RESOURCES[r], None
 
 
 @mcp.tool()
 def daftra_list(resource: str, page: int = 1, limit: int = 20,
                 filters: str = "") -> str:
-    """جلب قائمة من أي مورد في دفترة.
+    """جلب قائمة من اي مورد في دفترة.
     resource: clients, suppliers, products, invoices, estimates,
     purchase_invoices, refund_receipts, expenses, incomes,
     invoice_payments, journals, treasuries, stock_transactions,
     appointments, notes, staff, work_orders.
-    filters: نص JSON اختياري، مثال: {"client_id": 31}
+    filters: نص JSON اختياري مثل {"client_id": 31}
     """
     res, err = _resolve(resource)
     if err:
@@ -92,7 +89,7 @@ def daftra_list(resource: str, page: int = 1, limit: int = 20,
         try:
             params.update(json.loads(filters))
         except json.JSONDecodeError:
-            return json.dumps({"error": "filters ليست JSON صالح"},
+            return json.dumps({"error": "filters is not valid JSON"},
                               ensure_ascii=False)
     return json.dumps(_request("GET", endpoint, params=params),
                       ensure_ascii=False)
@@ -100,7 +97,7 @@ def daftra_list(resource: str, page: int = 1, limit: int = 20,
 
 @mcp.tool()
 def daftra_get(resource: str, record_id: int) -> str:
-    """جلب سجل واحد بالتفصيل من أي مورد في دفترة برقمه (ID)."""
+    """جلب سجل واحد بالتفصيل من اي مورد في دفترة برقمه."""
     res, err = _resolve(resource)
     if err:
         return json.dumps(err, ensure_ascii=False)
@@ -111,10 +108,10 @@ def daftra_get(resource: str, record_id: int) -> str:
 
 @mcp.tool()
 def daftra_create(resource: str, data: str) -> str:
-    """إنشاء سجل جديد في أي مورد في دفترة.
-    data: نص JSON بحقول السجل (غلاف الـ Model يُضاف تلقائيًا).
-    مثال لعرض سعر (estimates): {"client_id": 31, "date": "2026-07-19",
-      "InvoiceItem": [{"description": "توريد وتركيب قفل باب غرفة تبريد",
+    """انشاء سجل جديد في اي مورد في دفترة.
+    data: نص JSON بحقول السجل.
+    مثال لعرض سعر: {"client_id": 31, "date": "2026-07-19",
+      "InvoiceItem": [{"description": "توريد وتركيب قفل",
                        "unit_price": 450, "quantity": 1, "tax1": 15}]}
     """
     res, err = _resolve(resource)
@@ -124,7 +121,7 @@ def daftra_create(resource: str, data: str) -> str:
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as e:
-        return json.dumps({"error": f"data ليست JSON صالح: {e}"},
+        return json.dumps({"error": f"data is not valid JSON: {e}"},
                           ensure_ascii=False)
     body = payload if model in payload else {model: payload}
     return json.dumps(_request("POST", endpoint, body=body),
@@ -141,7 +138,7 @@ def daftra_update(resource: str, record_id: int, data: str) -> str:
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as e:
-        return json.dumps({"error": f"data ليست JSON صالح: {e}"},
+        return json.dumps({"error": f"data is not valid JSON: {e}"},
                           ensure_ascii=False)
     body = payload if model in payload else {model: payload}
     return json.dumps(_request("PUT", f"{endpoint}/{record_id}", body=body),
@@ -150,10 +147,10 @@ def daftra_update(resource: str, record_id: int, data: str) -> str:
 
 @mcp.tool()
 def daftra_delete(resource: str, record_id: int, confirm: bool = False) -> str:
-    """حذف سجل — نهائي ولا يمكن التراجع. يتطلب confirm=True بعد تأكيد المستخدم."""
+    """حذف سجل نهائيا. يتطلب confirm=True بعد تاكيد المستخدم."""
     if not confirm:
         return json.dumps({
-            "warning": "الحذف نهائي. أعد الاستدعاء بـ confirm=True بعد تأكيد المستخدم.",
+            "warning": "delete is permanent, call again with confirm=True",
             "resource": resource, "record_id": record_id,
         }, ensure_ascii=False)
     res, err = _resolve(resource)
@@ -167,16 +164,16 @@ def daftra_delete(resource: str, record_id: int, confirm: bool = False) -> str:
 @mcp.tool()
 def create_estimate(client_id: int, items: str, date: str = "",
                     notes: str = "", draft: bool = False) -> str:
-    """إنشاء عرض سعر مبسط.
-    items: نص JSON قائمة بنود:
-      [{"description": "...", "unit_price": 450, "quantity": 1, "tax1": 15}]
+    """انشاء عرض سعر.
+    items: نص JSON قائمة بنود مثل
+    [{"description": "بند", "unit_price": 450, "quantity": 1, "tax1": 15}]
     """
     try:
         items_list = json.loads(items)
         if not isinstance(items_list, list):
-            raise ValueError("items يجب أن تكون قائمة")
+            raise ValueError("items must be a list")
     except (json.JSONDecodeError, ValueError) as e:
-        return json.dumps({"error": f"items غير صالحة: {e}"},
+        return json.dumps({"error": f"invalid items: {e}"},
                           ensure_ascii=False)
     invoice = {
         "client_id": client_id,
@@ -195,13 +192,13 @@ def create_estimate(client_id: int, items: str, date: str = "",
 @mcp.tool()
 def create_invoice(client_id: int, items: str, date: str = "",
                    notes: str = "", draft: bool = False) -> str:
-    """إنشاء فاتورة مبيعات مبسطة. items بنفس صيغة create_estimate."""
+    """انشاء فاتورة مبيعات. items بنفس صيغة create_estimate."""
     try:
         items_list = json.loads(items)
         if not isinstance(items_list, list):
-            raise ValueError("items يجب أن تكون قائمة")
+            raise ValueError("items must be a list")
     except (json.JSONDecodeError, ValueError) as e:
-        return json.dumps({"error": f"items غير صالحة: {e}"},
+        return json.dumps({"error": f"invalid items: {e}"},
                           ensure_ascii=False)
     invoice = {
         "client_id": client_id,
@@ -221,7 +218,7 @@ def create_invoice(client_id: int, items: str, date: str = "",
 def create_client(business_name: str, phone: str = "", email: str = "",
                   city: str = "", tax_number: str = "",
                   commercial_register: str = "") -> str:
-    """إضافة عميل جديد (منشأة) بطريقة مبسطة."""
+    """اضافة عميل جديد (منشاة)."""
     client = {
         "business_name": business_name,
         "type": 3,
@@ -265,4 +262,22 @@ def create_expense(amount: float, description: str, date: str = "",
 def record_invoice_payment(invoice_id: int, amount: float,
                            payment_method: str = "cash",
                            date: str = "", treasury_id: int = 0) -> str:
-    """تسجيل دفعة على فاتورة موج
+    """تسجيل دفعة على فاتورة."""
+    payment = {
+        "invoice_id": invoice_id,
+        "amount": amount,
+        "payment_method": payment_method,
+        "currency_code": "SAR",
+    }
+    if date:
+        payment["date"] = date
+    if treasury_id:
+        payment["treasury_id"] = treasury_id
+    return json.dumps(
+        _request("POST", "invoice_payments", body={"InvoicePayment": payment}),
+        ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="http", host="0.0.0.0", port=port, path="/mcp")
