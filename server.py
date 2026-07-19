@@ -29,13 +29,15 @@ mcp = FastMCP("Daftra SabraTech - Full CRUD")
 def _request(method, endpoint, params=None, body=None):
     url = f"{BASE_URL}/{endpoint.lstrip('/')}"
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=30, follow_redirects=False) as client:
             resp = client.request(method, url, headers=HEADERS,
                                   params=params, json=body)
         try:
             data = resp.json()
         except Exception:
             data = {"raw": resp.text}
+            if resp.status_code in (301, 302, 303, 307, 308):
+                data["redirect_location"] = resp.headers.get("location", "")
         return {"status_code": resp.status_code, "data": data}
     except Exception as e:
         return {"status_code": 0, "error": str(e)}
@@ -118,12 +120,19 @@ def daftra_create(resource: str, data: str) -> str:
     if err:
         return json.dumps(err, ensure_ascii=False)
     endpoint, model = res
+    is_estimate = resource.strip().lower() == "estimates"
+    if is_estimate:
+        # عروض الاسعار في دفترة هي فواتير من النوع 3
+        # ولا يوجد مسار POST /estimates - الانشاء عبر POST /invoices
+        endpoint = "invoices"
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as e:
         return json.dumps({"error": f"data is not valid JSON: {e}"},
                           ensure_ascii=False)
     body = payload if model in payload else {model: payload}
+    if is_estimate and isinstance(body.get("Invoice"), dict):
+        body["Invoice"].setdefault("type", 3)
     return json.dumps(_request("POST", endpoint, body=body),
                       ensure_ascii=False)
 
@@ -135,6 +144,8 @@ def daftra_update(resource: str, record_id: int, data: str) -> str:
     if err:
         return json.dumps(err, ensure_ascii=False)
     endpoint, model = res
+    if resource.strip().lower() == "estimates":
+        endpoint = "invoices"
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as e:
@@ -157,6 +168,8 @@ def daftra_delete(resource: str, record_id: int, confirm: bool = False) -> str:
     if err:
         return json.dumps(err, ensure_ascii=False)
     endpoint, _ = res
+    if resource.strip().lower() == "estimates":
+        endpoint = "invoices"
     return json.dumps(_request("DELETE", f"{endpoint}/{record_id}"),
                       ensure_ascii=False)
 
@@ -177,6 +190,7 @@ def create_estimate(client_id: int, items: str, date: str = "",
                           ensure_ascii=False)
     invoice = {
         "client_id": client_id,
+        "type": 3,
         "draft": 1 if draft else 0,
         "is_offline": 1,
         "InvoiceItem": items_list,
@@ -185,7 +199,7 @@ def create_estimate(client_id: int, items: str, date: str = "",
         invoice["date"] = date
     if notes:
         invoice["notes"] = notes
-    return json.dumps(_request("POST", "estimates", body={"Invoice": invoice}),
+    return json.dumps(_request("POST", "invoices", body={"Invoice": invoice}),
                       ensure_ascii=False)
 
 
@@ -202,6 +216,7 @@ def create_invoice(client_id: int, items: str, date: str = "",
                           ensure_ascii=False)
     invoice = {
         "client_id": client_id,
+        "type": 0,
         "draft": 1 if draft else 0,
         "is_offline": 1,
         "InvoiceItem": items_list,
