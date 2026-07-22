@@ -49,7 +49,7 @@ RESOURCES = {
     "products":           ("products", "Product"),
     "invoices":           ("invoices", "Invoice"),
     "estimates":          ("estimates", "Invoice"),
-    "purchase_invoices":  ("purchase_invoices", "Invoice"),
+    "purchase_invoices":  ("purchase_invoices", "PurchaseOrder"),
     "refund_receipts":    ("refund_receipts", "Invoice"),
     "expenses":           ("expenses", "Expense"),
     "incomes":            ("incomes", "Income"),
@@ -115,6 +115,9 @@ def daftra_create(resource: str, data: str) -> str:
     مثال لعرض سعر: {"client_id": 31, "date": "2026-07-19",
       "InvoiceItem": [{"description": "توريد وتركيب قفل",
                        "unit_price": 450, "quantity": 1, "tax1": 15}]}
+    مثال لفاتورة مشتريات: {"supplier_id": 54, "date": "2026-06-06",
+      "PurchaseOrderItem": [{"product_id": 282, "unit_price": 65,
+                             "quantity": 15, "tax1": 15}]}
     """
     res, err = _resolve(resource)
     if err:
@@ -172,6 +175,104 @@ def daftra_delete(resource: str, record_id: int, confirm: bool = False) -> str:
         endpoint = "invoices"
     return json.dumps(_request("DELETE", f"{endpoint}/{record_id}"),
                       ensure_ascii=False)
+
+
+@mcp.tool()
+def create_purchase_invoice(supplier_id: int, items: str, date: str = "",
+                            notes: str = "", draft: bool = False,
+                            invoice_number: str = "") -> str:
+    """انشاء فاتورة مشتريات مرتبطة بمورد.
+    items: نص JSON قائمة بنود مثل
+    [{"product_id": 282, "unit_price": 65, "quantity": 15, "tax1": 15}]
+    او بوصف بدون منتج:
+    [{"description": "بند", "unit_price": 100, "quantity": 1, "tax1": 15}]
+    invoice_number: رقم فاتورة المورد الورقية (اختياري).
+    """
+    try:
+        items_list = json.loads(items)
+        if not isinstance(items_list, list):
+            raise ValueError("items must be a list")
+    except (json.JSONDecodeError, ValueError) as e:
+        return json.dumps({"error": f"invalid items: {e}"},
+                          ensure_ascii=False)
+    po = {
+        "supplier_id": supplier_id,
+        "type": 0,
+        "draft": 1 if draft else 0,
+        "is_offline": 1,
+        "currency_code": "SAR",
+        "PurchaseOrderItem": items_list,
+    }
+    if date:
+        po["date"] = date
+    if notes:
+        po["notes"] = notes
+    if invoice_number:
+        po["po_number"] = invoice_number
+    return json.dumps(
+        _request("POST", "purchase_invoices", body={"PurchaseOrder": po}),
+        ensure_ascii=False)
+
+
+@mcp.tool()
+def create_supplier(business_name: str, phone: str = "", email: str = "",
+                    city: str = "", tax_number: str = "",
+                    commercial_register: str = "") -> str:
+    """اضافة مورد جديد."""
+    supplier = {
+        "business_name": business_name,
+        "is_offline": 1,
+        "country_code": "SA",
+        "default_currency_code": "SAR",
+    }
+    if phone:
+        supplier["phone1"] = phone
+    if email:
+        supplier["email"] = email
+    if city:
+        supplier["city"] = city
+    if tax_number:
+        supplier["bn1"] = tax_number
+        supplier["bn1_label"] = "الرقم الضريبي"
+    if commercial_register:
+        supplier["bn2"] = commercial_register
+        supplier["bn2_label"] = "سجل تجارى/ رقم موحد"
+    return json.dumps(
+        _request("POST", "suppliers", body={"Supplier": supplier}),
+        ensure_ascii=False)
+
+
+@mcp.tool()
+def create_product(name: str, buy_price: float = 0, unit_price: float = 0,
+                   description: str = "", category_id: int = 0,
+                   supplier_id: int = 0, low_stock_threshold: int = 0,
+                   apply_vat: bool = True) -> str:
+    """اضافة منتج جديد.
+    category_id: رقم التصنيف (مثال: 3 = قطع ميكانيكا).
+    apply_vat: تفعيل ضريبة 15% على البيع.
+    """
+    product = {
+        "name": name,
+        "track_stock": 1,
+        "tracking_type": "quantity_only",
+    }
+    if buy_price:
+        product["buy_price"] = buy_price
+    if unit_price:
+        product["unit_price"] = unit_price
+    if description:
+        product["description"] = description
+    if category_id:
+        product["category_id"] = category_id
+    if supplier_id:
+        product["supplier_id"] = supplier_id
+    if low_stock_threshold:
+        product["low_stock_thershold"] = low_stock_threshold
+    if apply_vat:
+        product["tax1"] = 15
+    return json.dumps(
+        _request("POST", "products", body={"Product": product}),
+        ensure_ascii=False)
 
 
 @mcp.tool()
