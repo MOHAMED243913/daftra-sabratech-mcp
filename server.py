@@ -115,7 +115,8 @@ def daftra_create(resource: str, data: str) -> str:
     مثال لعرض سعر: {"client_id": 31, "date": "2026-07-19",
       "InvoiceItem": [{"description": "توريد وتركيب قفل",
                        "unit_price": 450, "quantity": 1, "tax1": 15}]}
-    مثال لفاتورة مشتريات: {"supplier_id": 54, "date": "2026-06-06",
+    مثال لفاتورة مشتريات: {"PurchaseOrder": {"supplier_id": 54,
+      "date": "2026-06-06"},
       "PurchaseOrderItem": [{"product_id": 282, "unit_price": 65,
                              "quantity": 15, "tax1": 15}]}
     """
@@ -180,13 +181,19 @@ def daftra_delete(resource: str, record_id: int, confirm: bool = False) -> str:
 @mcp.tool()
 def create_purchase_invoice(supplier_id: int, items: str, date: str = "",
                             notes: str = "", draft: bool = False,
-                            invoice_number: str = "") -> str:
+                            invoice_number: str = "",
+                            payments: str = "") -> str:
     """انشاء فاتورة مشتريات مرتبطة بمورد.
     items: نص JSON قائمة بنود مثل
     [{"product_id": 282, "unit_price": 65, "quantity": 15, "tax1": 15}]
     او بوصف بدون منتج:
     [{"description": "بند", "unit_price": 100, "quantity": 1, "tax1": 15}]
     invoice_number: رقم فاتورة المورد الورقية (اختياري).
+    payments: نص JSON اختياري لقائمة الدفعات مثل
+    [{"payment_method": "bank", "amount": 115, "treasury_id": 1}]
+    قيم payment_method المعتمدة: bank او cash.
+    الخزائن: 1 = خزينة صبره تك، 2 = بنك الراجحي.
+    اتركه فارغا لمحاولة انشاء فاتورة اجلة غير مدفوعة.
     """
     try:
         items_list = json.loads(items)
@@ -195,13 +202,13 @@ def create_purchase_invoice(supplier_id: int, items: str, date: str = "",
     except (json.JSONDecodeError, ValueError) as e:
         return json.dumps({"error": f"invalid items: {e}"},
                           ensure_ascii=False)
+
     po = {
         "supplier_id": supplier_id,
         "type": 0,
         "draft": 1 if draft else 0,
         "is_offline": 1,
         "currency_code": "SAR",
-        "PurchaseOrderItem": items_list,
     }
     if date:
         po["date"] = date
@@ -209,9 +216,24 @@ def create_purchase_invoice(supplier_id: int, items: str, date: str = "",
         po["notes"] = notes
     if invoice_number:
         po["po_number"] = invoice_number
-    return json.dumps(
-        _request("POST", "purchase_invoices", body={"PurchaseOrder": po}),
-        ensure_ascii=False)
+
+    # دفترة تتوقع PurchaseOrderItem شقيقا لـ PurchaseOrder
+    # وليس متداخلا داخله - هذا كان سبب خطا
+    # "At least one item is required"
+    body = {"PurchaseOrder": po, "PurchaseOrderItem": items_list}
+
+    if payments:
+        try:
+            payments_list = json.loads(payments)
+            if not isinstance(payments_list, list):
+                raise ValueError("payments must be a list")
+        except (json.JSONDecodeError, ValueError) as e:
+            return json.dumps({"error": f"invalid payments: {e}"},
+                              ensure_ascii=False)
+        body["MultiplePayment"] = payments_list
+
+    return json.dumps(_request("POST", "purchase_invoices", body=body),
+                      ensure_ascii=False)
 
 
 @mcp.tool()
