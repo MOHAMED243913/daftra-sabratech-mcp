@@ -6,6 +6,21 @@ Daftra SabraTech MCP Server - Full CRUD
 المتغيرات البيئية المطلوبة:
     DAFTRA_SUBDOMAIN  -> النطاق الفرعي لحسابك في دفترة
     DAFTRA_APIKEY     -> مفتاح API من دفترة
+
+=== سجل التعديلات (2026-07-26) ===
+1. اصلاح جوهري: دفترة تتوقع InvoiceItem كشقيق لـ Invoice وليس متداخلا
+   داخله. الكود القديم كان يضع InvoiceItem داخل Invoice فترجع دفترة
+   الخطا: "Invoice is empty" مع validation_errors: Invoice.InvoiceItem = null
+   نفس نمط الخطا الذي اصلحناه سابقا في PurchaseOrderItem.
+2. اصلاح tax1: دفترة تتوقع "معرف الضريبة" وليس النسبة المئوية.
+   tax1 = 15  -> Invalid tax: tax not found or inactive
+   tax1 = 1   -> صحيح (ضريبة القيمة المضافة 15%)
+   تم اضافة تحويل تلقائي يقبل 15 ويحولها الى 1 كشبكة امان.
+3. اضافة client_email: دفترة ترفض الحفظ برسالة
+   "البريد الإلكتروني مطلوب إذا اخترت أن ترسل الفاتورة عبر البريد"
+   اذا كان العميل بلا بريد وكان الارسال بالبريد مفعلا في اعدادات دفترة.
+4. حماية daftra_update: التعديل على الفواتير وعروض السعر عبر API يمسح
+   البنود ويفسد السجل. اصبح يتطلب force=True صريحا.
 """
 
 import os
@@ -22,6 +37,20 @@ HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
 }
+
+# معرف ضريبة القيمة المضافة 15% في حساب صبرة تك بدفترة.
+# ليست النسبة المئوية بل رقم الضريبة المسجلة في الاعدادات.
+TAX_VAT_ID = 1
+
+# المفاتيح التي يجب ان تبقى في اعلى مستوى الطلب كاشقاء
+# للموديل الرئيسي ولا تدخل داخله.
+SIBLING_KEYS = (
+    "InvoiceItem",
+    "PurchaseOrderItem",
+    "MultiplePayment",
+    "InvoicePayment",
+    "InvoiceDocument",
+)
 
 mcp = FastMCP("Daftra SabraTech - Full CRUD")
 
@@ -72,6 +101,41 @@ def _resolve(resource):
     return RESOURCES[r], None
 
 
+def _normalize_tax(items, apply_vat=True):
+    """تصحيح حقل الضريبة في البنود.
+
+    دفترة تتوقع معرف الضريبة لا نسبتها. اي قيمة 15 او 15.0 او True
+    تعني ضريبة القيمة المضافة وتحول الى TAX_VAT_ID.
+    apply_vat=True يضيف الضريبة للبنود التي لا تحملها اصلا.
+    لالغاء الضريبة على بند بعينه مرر tax1 = 0 صراحة.
+    """
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "tax1" in item:
+            value = item["tax1"]
+            if value is True:
+                item["tax1"] = TAX_VAT_ID
+            elif isinstance(value, (int, float)) and float(value) == 15.0:
+                item["tax1"] = TAX_VAT_ID
+        elif apply_vat:
+            item["tax1"] = TAX_VAT_ID
+    return items
+
+
+def _parse_items(items):
+    """تحليل نص JSON لقائمة البنود مع التحقق."""
+    try:
+        items_list = json.loads(items)
+        if not isinstance(items_list, list):
+            raise ValueError("items must be a JSON list")
+        if not items_list:
+            raise ValueError("items list is empty")
+    except (json.JSONDecodeError, ValueError) as e:
+        return None, {"error": f"invalid items: {e}"}
+    return items_list, None
+
+
 @mcp.tool()
 def daftra_list(resource: str, page: int = 1, limit: int = 20,
                 filters: str = "") -> str:
@@ -111,14 +175,23 @@ def daftra_get(resource: str, record_id: int) -> str:
 @mcp.tool()
 def daftra_create(resource: str, data: str) -> str:
     """انشاء سجل جديد في اي مورد في دفترة.
-    data: نص JSON بحقول السجل.
-    مثال لعرض سعر: {"client_id": 31, "date": "2026-07-19",
-      "InvoiceItem": [{"description": "توريد وتركيب قفل",
-                       "unit_price": 450, "quantity": 1, "tax1": 15}]}
-    مثال لفاتورة مشتريات: {"PurchaseOrder": {"supplier_id": 54,
-      "date": "2026-06-06"},
-      "PurchaseOrderItem": [{"product_id": 282, "unit_price": 65,
-                             "quantity": 15, "tax1": 15}]}
+
+    مهم: البنود (InvoiceItem / PurchaseOrderItem) والدفعات
+    (MultiplePayment) تكون اشقاء للموديل الرئيسي وليست داخله.
+    وحقل tax1 هو معرف الضريبة (1 = ضريبة القيمة المضافة 15%)
+    وليس النسبة المئوية.
+
+    مثال لعرض سعر:
+    {"Invoice": {"client_id": 31, "date": "2026-07-26",
+                 "client_email": "x@y.com", "notes": "..."},
+     "InvoiceItem": [{"item": "اسم البند",
+                      "description": "وصف تفصيلي",
+                      "unit_price": 450, "quantity": 1, "tax1": 1}]}
+
+    مثال لفاتورة مشتريات:
+    {"PurchaseOrder": {"supplier_id": 54, "date": "2026-06-06"},
+     "PurchaseOrderItem": [{"product_id": 282, "unit_price": 65,
+                            "quantity": 15, "tax1": 1}]}
     """
     res, err = _resolve(resource)
     if err:
@@ -134,28 +207,69 @@ def daftra_create(resource: str, data: str) -> str:
     except json.JSONDecodeError as e:
         return json.dumps({"error": f"data is not valid JSON: {e}"},
                           ensure_ascii=False)
-    body = payload if model in payload else {model: payload}
+    if not isinstance(payload, dict):
+        return json.dumps({"error": "data must be a JSON object"},
+                          ensure_ascii=False)
+
+    if model in payload:
+        body = payload
+    else:
+        # فصل مفاتيح الاشقاء حتى لا تدخل داخل الموديل الرئيسي
+        siblings = {k: payload.pop(k) for k in list(payload)
+                    if k in SIBLING_KEYS}
+        body = {model: payload}
+        body.update(siblings)
+
     if is_estimate and isinstance(body.get("Invoice"), dict):
         body["Invoice"].setdefault("type", 3)
+
+    for key in ("InvoiceItem", "PurchaseOrderItem"):
+        if isinstance(body.get(key), list):
+            _normalize_tax(body[key], apply_vat=False)
+
     return json.dumps(_request("POST", endpoint, body=body),
                       ensure_ascii=False)
 
 
 @mcp.tool()
-def daftra_update(resource: str, record_id: int, data: str) -> str:
-    """تعديل سجل موجود. data: نص JSON بالحقول المراد تغييرها فقط."""
+def daftra_update(resource: str, record_id: int, data: str,
+                  force: bool = False) -> str:
+    """تعديل سجل موجود. data: نص JSON بالحقول المراد تغييرها فقط.
+
+    تحذير: التعديل على invoices او estimates عبر API يمسح بنود السجل
+    ويفسده. الحل الصحيح هو التعديل من واجهة دفترة او اعادة الانشاء.
+    لتجاوز الحماية عن قصد مرر force=True.
+    """
     res, err = _resolve(resource)
     if err:
         return json.dumps(err, ensure_ascii=False)
     endpoint, model = res
-    if resource.strip().lower() == "estimates":
+    r = resource.strip().lower()
+
+    if r in ("invoices", "estimates", "refund_receipts") and not force:
+        return json.dumps({
+            "blocked": "التعديل عبر API على هذا المورد يفسد البنود",
+            "recommendation": "عدل من واجهة دفترة او انشئ سجلا جديدا",
+            "override": "لتجاوز الحماية مرر force=True",
+            "resource": resource, "record_id": record_id,
+        }, ensure_ascii=False)
+
+    if r == "estimates":
         endpoint = "invoices"
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as e:
         return json.dumps({"error": f"data is not valid JSON: {e}"},
                           ensure_ascii=False)
-    body = payload if model in payload else {model: payload}
+
+    if model in payload:
+        body = payload
+    else:
+        siblings = {k: payload.pop(k) for k in list(payload)
+                    if k in SIBLING_KEYS}
+        body = {model: payload}
+        body.update(siblings)
+
     return json.dumps(_request("PUT", f"{endpoint}/{record_id}", body=body),
                       ensure_ascii=False)
 
@@ -179,29 +293,109 @@ def daftra_delete(resource: str, record_id: int, confirm: bool = False) -> str:
 
 
 @mcp.tool()
+def create_estimate(client_id: int, items: str, date: str = "",
+                    notes: str = "", draft: bool = False,
+                    client_email: str = "", apply_vat: bool = True) -> str:
+    """انشاء عرض سعر.
+
+    items: نص JSON قائمة بنود مثل
+    [{"item": "اسم مختصر للبند",
+      "description": "وصف تفصيلي كامل",
+      "unit_price": 450, "quantity": 1, "tax1": 1}]
+
+    tax1 هو معرف الضريبة لا النسبة (1 = ضريبة القيمة المضافة 15%).
+    لالغاء الضريبة على بند مرر tax1 = 0.
+    apply_vat=True يضيف الضريبة تلقائيا للبنود التي لا تحملها.
+
+    client_email: مطلوب اذا كان العميل بلا بريد مسجل في دفترة، والا
+    ترجع دفترة خطا "البريد الإلكتروني مطلوب".
+    """
+    items_list, err = _parse_items(items)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    _normalize_tax(items_list, apply_vat=apply_vat)
+
+    invoice = {
+        "client_id": client_id,
+        "type": 3,
+        "draft": 1 if draft else 0,
+        "is_offline": 1,
+        "currency_code": "SAR",
+    }
+    if date:
+        invoice["date"] = date
+    if notes:
+        invoice["notes"] = notes
+    if client_email:
+        invoice["client_email"] = client_email
+
+    # دفترة تتوقع InvoiceItem شقيقا لـ Invoice وليس متداخلا داخله
+    # هذا كان سبب خطا "Invoice is empty"
+    body = {"Invoice": invoice, "InvoiceItem": items_list}
+    return json.dumps(_request("POST", "invoices", body=body),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def create_invoice(client_id: int, items: str, date: str = "",
+                   notes: str = "", draft: bool = False,
+                   client_email: str = "", apply_vat: bool = True) -> str:
+    """انشاء فاتورة مبيعات. items بنفس صيغة create_estimate."""
+    items_list, err = _parse_items(items)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    _normalize_tax(items_list, apply_vat=apply_vat)
+
+    invoice = {
+        "client_id": client_id,
+        "type": 0,
+        "draft": 1 if draft else 0,
+        "is_offline": 1,
+        "currency_code": "SAR",
+    }
+    if date:
+        invoice["date"] = date
+    if notes:
+        invoice["notes"] = notes
+    if client_email:
+        invoice["client_email"] = client_email
+
+    body = {"Invoice": invoice, "InvoiceItem": items_list}
+    return json.dumps(_request("POST", "invoices", body=body),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
 def create_purchase_invoice(supplier_id: int, items: str, date: str = "",
                             notes: str = "", draft: bool = False,
                             invoice_number: str = "",
-                            payments: str = "") -> str:
+                            payments: str = "",
+                            supplier_email: str = "",
+                            apply_vat: bool = True) -> str:
     """انشاء فاتورة مشتريات مرتبطة بمورد.
+
     items: نص JSON قائمة بنود مثل
-    [{"product_id": 282, "unit_price": 65, "quantity": 15, "tax1": 15}]
+    [{"product_id": 282, "unit_price": 65, "quantity": 15, "tax1": 1}]
     او بوصف بدون منتج:
-    [{"description": "بند", "unit_price": 100, "quantity": 1, "tax1": 15}]
+    [{"description": "بند", "unit_price": 100, "quantity": 1, "tax1": 1}]
+
+    tax1 هو معرف الضريبة لا النسبة (1 = ضريبة القيمة المضافة 15%).
+
     invoice_number: رقم فاتورة المورد الورقية (اختياري).
+    supplier_email: مرره اذا كان المورد بلا بريد مسجل في دفترة.
+
     payments: نص JSON اختياري لقائمة الدفعات مثل
-    [{"payment_method": "bank", "amount": 115, "treasury_id": 1}]
+    [{"payment_method": "cash", "amount": 115, "treasury_id": 1}]
     قيم payment_method المعتمدة: bank او cash.
     الخزائن: 1 = خزينة صبره تك، 2 = بنك الراجحي.
-    اتركه فارغا لمحاولة انشاء فاتورة اجلة غير مدفوعة.
+    اتركه فارغا لانشاء فاتورة اجلة غير مدفوعة.
+    ملاحظة: حقل MultiplePayment لم يثبت نجاحه بعد عبر API - الاسلوب
+    الموثوق حاليا هو انشاء الفاتورة اجلة ثم تسجيل الدفعة من الواجهة.
     """
-    try:
-        items_list = json.loads(items)
-        if not isinstance(items_list, list):
-            raise ValueError("items must be a list")
-    except (json.JSONDecodeError, ValueError) as e:
-        return json.dumps({"error": f"invalid items: {e}"},
-                          ensure_ascii=False)
+    items_list, err = _parse_items(items)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    _normalize_tax(items_list, apply_vat=apply_vat)
 
     po = {
         "supplier_id": supplier_id,
@@ -216,6 +410,8 @@ def create_purchase_invoice(supplier_id: int, items: str, date: str = "",
         po["notes"] = notes
     if invoice_number:
         po["po_number"] = invoice_number
+    if supplier_email:
+        po["supplier_email"] = supplier_email
 
     # دفترة تتوقع PurchaseOrderItem شقيقا لـ PurchaseOrder
     # وليس متداخلا داخله - هذا كان سبب خطا
@@ -230,6 +426,11 @@ def create_purchase_invoice(supplier_id: int, items: str, date: str = "",
         except (json.JSONDecodeError, ValueError) as e:
             return json.dumps({"error": f"invalid payments: {e}"},
                               ensure_ascii=False)
+        for p in payments_list:
+            if isinstance(p, dict):
+                p.setdefault("currency_code", "SAR")
+                if date:
+                    p.setdefault("date", date)
         body["MultiplePayment"] = payments_list
 
     return json.dumps(_request("POST", "purchase_invoices", body=body),
@@ -265,98 +466,13 @@ def create_supplier(business_name: str, phone: str = "", email: str = "",
 
 
 @mcp.tool()
-def create_product(name: str, buy_price: float = 0, unit_price: float = 0,
-                   description: str = "", category_id: int = 0,
-                   supplier_id: int = 0, low_stock_threshold: int = 0,
-                   apply_vat: bool = True) -> str:
-    """اضافة منتج جديد.
-    category_id: رقم التصنيف (مثال: 3 = قطع ميكانيكا).
-    apply_vat: تفعيل ضريبة 15% على البيع.
-    """
-    product = {
-        "name": name,
-        "track_stock": 1,
-        "tracking_type": "quantity_only",
-    }
-    if buy_price:
-        product["buy_price"] = buy_price
-    if unit_price:
-        product["unit_price"] = unit_price
-    if description:
-        product["description"] = description
-    if category_id:
-        product["category_id"] = category_id
-    if supplier_id:
-        product["supplier_id"] = supplier_id
-    if low_stock_threshold:
-        product["low_stock_thershold"] = low_stock_threshold
-    if apply_vat:
-        product["tax1"] = 15
-    return json.dumps(
-        _request("POST", "products", body={"Product": product}),
-        ensure_ascii=False)
-
-
-@mcp.tool()
-def create_estimate(client_id: int, items: str, date: str = "",
-                    notes: str = "", draft: bool = False) -> str:
-    """انشاء عرض سعر.
-    items: نص JSON قائمة بنود مثل
-    [{"description": "بند", "unit_price": 450, "quantity": 1, "tax1": 15}]
-    """
-    try:
-        items_list = json.loads(items)
-        if not isinstance(items_list, list):
-            raise ValueError("items must be a list")
-    except (json.JSONDecodeError, ValueError) as e:
-        return json.dumps({"error": f"invalid items: {e}"},
-                          ensure_ascii=False)
-    invoice = {
-        "client_id": client_id,
-        "type": 3,
-        "draft": 1 if draft else 0,
-        "is_offline": 1,
-        "InvoiceItem": items_list,
-    }
-    if date:
-        invoice["date"] = date
-    if notes:
-        invoice["notes"] = notes
-    return json.dumps(_request("POST", "invoices", body={"Invoice": invoice}),
-                      ensure_ascii=False)
-
-
-@mcp.tool()
-def create_invoice(client_id: int, items: str, date: str = "",
-                   notes: str = "", draft: bool = False) -> str:
-    """انشاء فاتورة مبيعات. items بنفس صيغة create_estimate."""
-    try:
-        items_list = json.loads(items)
-        if not isinstance(items_list, list):
-            raise ValueError("items must be a list")
-    except (json.JSONDecodeError, ValueError) as e:
-        return json.dumps({"error": f"invalid items: {e}"},
-                          ensure_ascii=False)
-    invoice = {
-        "client_id": client_id,
-        "type": 0,
-        "draft": 1 if draft else 0,
-        "is_offline": 1,
-        "InvoiceItem": items_list,
-    }
-    if date:
-        invoice["date"] = date
-    if notes:
-        invoice["notes"] = notes
-    return json.dumps(_request("POST", "invoices", body={"Invoice": invoice}),
-                      ensure_ascii=False)
-
-
-@mcp.tool()
 def create_client(business_name: str, phone: str = "", email: str = "",
                   city: str = "", tax_number: str = "",
                   commercial_register: str = "") -> str:
-    """اضافة عميل جديد (منشاة)."""
+    """اضافة عميل جديد (منشاة).
+    يفضل تمرير email دائما لان دفترة قد ترفض انشاء فواتير لعميل
+    بلا بريد الكتروني.
+    """
     client = {
         "business_name": business_name,
         "type": 3,
@@ -381,11 +497,53 @@ def create_client(business_name: str, phone: str = "", email: str = "",
 
 
 @mcp.tool()
+def create_product(name: str, buy_price: float = 0, unit_price: float = 0,
+                   description: str = "", category_id: int = 0,
+                   supplier_id: int = 0, low_stock_threshold: int = 0,
+                   apply_vat: bool = True) -> str:
+    """اضافة منتج جديد.
+    category_id: رقم التصنيف (مثال: 3 = قطع ميكانيكا).
+    apply_vat: ربط المنتج بضريبة القيمة المضافة 15%.
+    """
+    product = {
+        "name": name,
+        "track_stock": 1,
+        "tracking_type": "quantity_only",
+    }
+    if buy_price:
+        product["buy_price"] = buy_price
+    if unit_price:
+        product["unit_price"] = unit_price
+    if description:
+        product["description"] = description
+    if category_id:
+        product["category_id"] = category_id
+    if supplier_id:
+        product["supplier_id"] = supplier_id
+    if low_stock_threshold:
+        # ملاحظة: التسمية الخاطئة thershold هي تسمية دفترة نفسها
+        # ولا يجوز تصحيحها والا لن يقرأ الحقل
+        product["low_stock_thershold"] = low_stock_threshold
+    if apply_vat:
+        # معرف الضريبة لا النسبة
+        product["tax1"] = TAX_VAT_ID
+    return json.dumps(
+        _request("POST", "products", body={"Product": product}),
+        ensure_ascii=False)
+
+
+@mcp.tool()
 def create_expense(amount: float, description: str, date: str = "",
-                   category_id: int = 0, treasury_id: int = 0) -> str:
-    """تسجيل مصروف جديد."""
+                   category_id: int = 0, treasury_id: int = 0,
+                   notes: str = "") -> str:
+    """تسجيل مصروف جديد.
+    الخزائن: 1 = خزينة صبره تك، 2 = بنك الراجحي.
+    ملاحظة: حقل description لا يظهر في واجهة دفترة، لذلك يتم نسخه
+    الى حقل notes ايضا ليكون مرئيا.
+    """
     expense = {"amount": amount, "description": description,
                "currency_code": "SAR"}
+    expense["notes"] = notes if notes else description
     if date:
         expense["date"] = date
     if category_id:
@@ -400,7 +558,10 @@ def create_expense(amount: float, description: str, date: str = "",
 def record_invoice_payment(invoice_id: int, amount: float,
                            payment_method: str = "cash",
                            date: str = "", treasury_id: int = 0) -> str:
-    """تسجيل دفعة على فاتورة."""
+    """تسجيل دفعة على فاتورة.
+    payment_method: cash او bank.
+    الخزائن: 1 = خزينة صبره تك، 2 = بنك الراجحي.
+    """
     payment = {
         "invoice_id": invoice_id,
         "amount": amount,
