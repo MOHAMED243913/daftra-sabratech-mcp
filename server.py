@@ -21,6 +21,15 @@ Daftra SabraTech MCP Server - Full CRUD
    اذا كان العميل بلا بريد وكان الارسال بالبريد مفعلا في اعدادات دفترة.
 4. حماية daftra_update: التعديل على الفواتير وعروض السعر عبر API يمسح
    البنود ويفسد السجل. اصبح يتطلب force=True صريحا.
+
+=== سجل التعديلات (2026-11-06) ===
+5. اضافة طبقة الرواتب عبر واجهة الكيانات العامة v2 (/v2/api/entity).
+   دفترة لا توثق مسارات الرواتب رسميا، لذلك:
+   - payroll_discover: يكتشف مفاتيح الكيانات الصحيحة (قراءة فقط).
+   - payrun_list / payrun_get / payslip_list: قراءة المسيرات والقسائم.
+   - daftra_entity_list / daftra_entity_get: وصول عام لاي كيان v2.
+   متغيرات بيئة اختيارية: DAFTRA_PAYRUN_ENTITY, DAFTRA_PAYSLIP_ENTITY.
+   اداة دفع المسير مؤجلة حتى يثبت هيكل البيانات الفعلي.
 """
 
 import os
@@ -31,6 +40,15 @@ from fastmcp import FastMCP
 SUBDOMAIN = os.environ.get("DAFTRA_SUBDOMAIN", "")
 APIKEY = os.environ.get("DAFTRA_APIKEY", "")
 BASE_URL = f"https://{SUBDOMAIN}.daftra.com/api2"
+# واجهة الكيانات العامة (Entities API) - الاصدار الثاني
+# المسار الموثق في docs.daftara.dev: /v2/api/entity/{entity}/list/1
+V2_BASE_URL = f"https://{SUBDOMAIN}.daftra.com/v2/api"
+
+# مفاتيح كيانات الرواتب. دفترة لا توثق مسارات الرواتب رسميا،
+# لذلك المفاتيح قابلة للتغيير من متغيرات البيئة بعد اكتشافها
+# عبر الاداة payroll_discover دون تعديل الكود.
+PAYRUN_ENTITY = os.environ.get("DAFTRA_PAYRUN_ENTITY", "payrun")
+PAYSLIP_ENTITY = os.environ.get("DAFTRA_PAYSLIP_ENTITY", "payslip")
 
 HEADERS = {
     "APIKEY": APIKEY,
@@ -55,8 +73,8 @@ SIBLING_KEYS = (
 mcp = FastMCP("Daftra SabraTech - Full CRUD")
 
 
-def _request(method, endpoint, params=None, body=None):
-    url = f"{BASE_URL}/{endpoint.lstrip('/')}"
+def _request(method, endpoint, params=None, body=None, base=None):
+    url = f"{base or BASE_URL}/{endpoint.lstrip('/')}"
     try:
         with httpx.Client(timeout=30, follow_redirects=False) as client:
             resp = client.request(method, url, headers=HEADERS,
@@ -575,6 +593,125 @@ def record_invoice_payment(invoice_id: int, amount: float,
     return json.dumps(
         _request("POST", "invoice_payments", body={"InvoicePayment": payment}),
         ensure_ascii=False)
+
+
+# =====================================================================
+# الرواتب (Payroll) - عبر واجهة الكيانات العامة v2
+# =====================================================================
+# دفترة لا توثق مسارات الرواتب في واجهتها الرسمية. الادوات التالية
+# للقراءة فقط حاليا. اداة الدفع تضاف بعد التحقق من هيكل البيانات
+# الفعلي لان دفع المسير ينشئ قيودا محاسبية ولا يجوز تجربته عشوائيا.
+
+PAYROLL_CANDIDATES = (
+    "payrun", "payruns", "pay_run", "payroll", "payroll_run",
+    "payslip", "payslips", "pay_slip", "salary_slip",
+    "contract", "contracts", "staff_contract",
+)
+
+
+def _v2(method, path, params=None, body=None):
+    return _request(method, path, params=params, body=body,
+                    base=V2_BASE_URL)
+
+
+def _entity_list(entity, page=1, per_page=20, filters=None):
+    params = {"page": page, "per_page": per_page}
+    if filters:
+        params.update(filters)
+    return _v2("GET", f"entity/{entity}/list/1", params=params)
+
+
+def _parse_filters(filters):
+    if not filters:
+        return {}, None
+    try:
+        f = json.loads(filters)
+        if not isinstance(f, dict):
+            raise ValueError("filters must be a JSON object")
+        return f, None
+    except (json.JSONDecodeError, ValueError) as e:
+        return None, {"error": f"invalid filters: {e}"}
+
+
+@mcp.tool()
+def daftra_entity_list(entity: str, page: int = 1, per_page: int = 20,
+                       filters: str = "") -> str:
+    """جلب قائمة من اي كيان عبر واجهة الكيانات العامة v2.
+    entity: مفتاح الكيان مثل invoice, client, product, expense
+    او كيانات غير موثقة مثل الرواتب بعد اكتشافها.
+    filters: نص JSON اختياري.
+    """
+    f, err = _parse_filters(filters)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    return json.dumps(_entity_list(entity.strip(), page, per_page, f),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def daftra_entity_get(entity: str, record_id: int) -> str:
+    """جلب سجل واحد من اي كيان عبر واجهة v2."""
+    return json.dumps(_v2("GET", f"entity/{entity.strip()}/{record_id}"),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def payroll_discover() -> str:
+    """اكتشاف مفاتيح كيانات الرواتب الفعلية في حساب دفترة.
+    تجرب قائمة مفاتيح محتملة وتعيد رمز الاستجابة وعينة من الحقول.
+    المفتاح الذي يرجع 200 هو الصحيح: ضعه في متغير البيئة
+    DAFTRA_PAYRUN_ENTITY او DAFTRA_PAYSLIP_ENTITY على Render.
+    للقراءة فقط - لا يعدل اي بيانات.
+    """
+    results = {}
+    for key in PAYROLL_CANDIDATES:
+        r = _entity_list(key, page=1, per_page=1)
+        code = r.get("status_code")
+        entry = {"status_code": code}
+        data = r.get("data")
+        if code == 200 and isinstance(data, dict):
+            rows = data.get("data")
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                entry["sample_fields"] = list(rows[0].keys())[:40]
+            meta = data.get("meta")
+            if isinstance(meta, dict):
+                entry["total"] = meta.get("total")
+        elif "error" in r:
+            entry["error"] = r["error"]
+        results[key] = entry
+    return json.dumps({
+        "configured": {"payrun": PAYRUN_ENTITY, "payslip": PAYSLIP_ENTITY},
+        "results": results,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def payrun_list(page: int = 1, per_page: int = 20,
+                filters: str = "") -> str:
+    """جلب مسيرات الرواتب مع حالتها (مسودة / معتمد / مدفوع)."""
+    f, err = _parse_filters(filters)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    return json.dumps(_entity_list(PAYRUN_ENTITY, page, per_page, f),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def payrun_get(payrun_id: int) -> str:
+    """جلب مسير رواتب واحد بالتفصيل برقمه (مثال: 5 = مسير سبتمبر)."""
+    return json.dumps(_v2("GET", f"entity/{PAYRUN_ENTITY}/{payrun_id}"),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def payslip_list(payrun_id: int = 0, page: int = 1,
+                 per_page: int = 50) -> str:
+    """جلب قسائم الرواتب، اختياريا لمسير محدد.
+    كل قسيمة تحمل الموظف والاجمالي والاستقطاعات والصافي والحالة.
+    """
+    f = {"filter[payrun_id]": payrun_id} if payrun_id else None
+    return json.dumps(_entity_list(PAYSLIP_ENTITY, page, per_page, f),
+                      ensure_ascii=False)
 
 
 if __name__ == "__main__":
